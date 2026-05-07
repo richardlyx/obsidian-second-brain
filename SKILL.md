@@ -204,7 +204,20 @@ echo "   文件: agent-${AGENT_NAME}.md + VAULT-MAP.md"
 - **效果**：将 Context Window 占用从"全库扫描"降低到"单文件读取"，节省 90%+ Token
 
 ### 3.2 自动化归档（每日凌晨）
-部署 Cron 任务，执行：
+
+> ⚠️ **重要：此 skill 仅定义归档规范和目录结构，不会自动创建 cron 任务。**
+> 完整的 cron 任务配置参考见 `references/cron-config-reference.md`，包含：
+> - 每日 03:30 记忆归档任务的完整创建命令和 prompt
+> - 每 2 分钟反向驱动监听任务的完整创建命令
+> - B 类资源分类目录清单
+> - 常见陷阱和注意事项
+
+安装此 skill 后，你需要在对应 Agent 平台手动创建定时任务：
+
+**Hermes 用户**：运行 `references/cron-config-reference.md` 中的 `hermes cron create` 命令
+**OpenClaw 用户**：在 heartbeat 配置中添加相应的归档脚本
+
+归档任务应调用 Agent 的文件读写工具，按以下规则执行：
 - **A类 (记忆)**: 写入 `70-Agent-Memory/inbox/<Agent>.md`
 - **B类 (资源)**: 写入 `30-Resources/` (需具备跨场景复用价值)
 - **C类 (进展)**: 追加至 `50-Daily/YYYY-MM-DD.md`
@@ -247,7 +260,82 @@ macOS 默认 bash 为 3.2.57，**不支持 bash 4.0+ 语法**：
 - 二次运行不能覆盖用户自定义内容
 - 用户手动修改过 `agent-*.md` 后再次部署，文件内容必须保持不变
 
-## 🛠️ 7. 维护与迭代
+## 🏗️ 7. 多实例 Skill 安装指南
+
+当需要将此 skill 安装到多个 Agent 实例时，按以下路径分发。
+
+### 7.1 安装目标清单
+
+| 实例类型 | 技能安装路径 | 说明 |
+|---------|------------|------|
+| Hermes 主实例 | `~/.hermes/skills/productivity/obsidian-second-brain/` | 已有 SKILL.md + scripts/ |
+| Hermes Bot3 | `~/.hermes-3/skills/productivity/obsidian-second-brain/` | 独立实例，需复制 |
+| Hermes 新媒体 | `~/.hermes-newmedia/skills/productivity/obsidian-second-brain/` | 独立实例，需复制 |
+| OpenClaw 全局 | `~/.openclaw/plugin-skills/obsidian-second-brain/` | 所有 OpenClaw Bot 共享 |
+| OpenClaw workspace 级 | `~/.openclaw/workspace*/skills/obsidian-second-brain/` | 仅对有 skills 目录的 workspace |
+
+### 7.2 一键安装命令
+
+```bash
+# 以主实例为源，分发到所有 Hermes 实例
+for home in ~/.hermes ~/.hermes-3 ~/.hermes-newmedia; do
+  if [ -d "$home" ]; then
+    mkdir -p "$home/skills/productivity/obsidian-second-brain/scripts"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/SKILL.md \
+       "$home/skills/productivity/obsidian-second-brain/"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh \
+       "$home/skills/productivity/obsidian-second-brain/scripts/"
+    echo "✅ $home"
+  fi
+done
+
+# OpenClaw 全局 plugin-skills
+mkdir -p ~/.openclaw/plugin-skills/obsidian-second-brain/scripts
+cp ~/.hermes/skills/productivity/obsidian-second-brain/SKILL.md \
+   ~/.openclaw/plugin-skills/obsidian-second-brain/
+cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh \
+   ~/.openclaw/plugin-skills/obsidian-second-brain/scripts/
+echo "✅ OpenClaw global"
+
+# OpenClaw workspace-level（仅当 workspace 有 skills 目录时）
+for ws in ~/.openclaw/workspace*/; do
+  skills_dir="${ws}skills"
+  if [ -d "$skills_dir" ] && [ ! -d "$skills_dir/obsidian-second-brain" ]; then
+    mkdir -p "$skills_dir/obsidian-second-brain/scripts"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/SKILL.md "$skills_dir/obsidian-second-brain/"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh "$skills_dir/obsidian-second-brain/scripts/"
+    echo "✅ $(basename $ws)"
+  fi
+done
+```
+
+### 7.3 OpenClaw 技能加载机制
+
+- **plugin-skills**：全局共享，所有 OpenClaw Bot 自动加载，无需额外配置
+- **workspace-level skills**：部分 workspace 有独立 `skills/` 目录（如 workspace-bot1、workspace），这些 workspace 的 Bot 优先加载 workspace 级副本
+- 没有独立 skills 目录的 workspace（workspace-bot2/3/4）依赖全局 plugin-skils
+
+### 7.4 验证方法
+
+```bash
+# 检查 Hermes 实例
+for home in ~/.hermes ~/.hermes-3 ~/.hermes-newmedia; do
+  [ -f "$home/skills/productivity/obsidian-second-brain/SKILL.md" ] && echo "✅ $home" || echo "❌ $home"
+done
+
+# 检查 OpenClaw
+[ -f ~/.openclaw/plugin-skills/obsidian-second-brain/SKILL.md" ] && echo "✅ OpenClaw global" || echo "❌ OpenClaw global"
+```
+
+## 🛠️ 8. 维护与迭代
 - **每周**: Review `70-Agent-Memory/inbox/`，将高价值记忆合并
 - **每月**: 优化 `VAULT-MAP.md`，根据 Agent 读取热点调整导航
 - **定期**: 清理 `00-Inbox/processed/` (保留最近 30 天)
+
+## 📋 9. Cron 任务参考配置
+
+实际运行的归档 cron 任务配置见 `references/cron-config-reference.md`，包含：
+- 每日 03:30 记忆归档任务的完整流程
+- 每 2 分钟反向驱动监听任务
+- B 类资源分类目录清单
+- 常见陷阱和注意事项
