@@ -131,9 +131,23 @@ macOS 默认 bash 为 3.2.57，**不支持 bash 4.0+ 语法**：
 obsidian-second-brain/
 ├── README.md                    # 本文件
 ├── SKILL.md                     # Hermes Skill 完整定义
+├── references/
+│   └── cron-config-reference.md # Cron 任务配置参考（含完整创建命令和 prompt）
 └── scripts/
     └── deploy-second-brain.sh   # 自动化部署脚本（7.7KB）
 ```
+
+## ⏰ 定时任务配置
+
+Skill 安装后需要创建 cron 任务来实现自动化归档和反向驱动。完整的配置参考见 `references/cron-config-reference.md`：
+
+| 任务 | 调度 | 说明 |
+|------|------|------|
+| 记忆归档 | `30 3 * * *`（每日 03:30） | A/B/C 三类归档到 Obsidian |
+| 反向驱动监听 | `*/2 * * * *`（每 2 分钟） | 轮询 Inbox 执行用户指令 |
+
+**Hermes 用户**：复制参考文件中的 `hermes cron create` 命令直接创建
+**OpenClaw 用户**：在 heartbeat 配置中添加相应的归档脚本
 
 ## 🤝 贡献
 
