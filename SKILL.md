@@ -41,7 +41,7 @@ description: Universal framework for deploying Obsidian as any AI Agent's local 
 # deploy-second-brain.sh — 安全幂等部署
 set -euo pipefail
 
-VAULT="${OBSIDIAN_VAULT_PATH:-$HOME/Documents/Obsidian Vault}"
+VAULT="${OBSIDIAN_VAULT_PATH:-${1:-$HOME/Documents/Obsidian Vault}}"
 
 echo "🚀 正在部署 Obsidian 第二大脑到: $VAULT"
 mkdir -p "$VAULT"
@@ -92,7 +92,7 @@ if [ ! -f "$AGENT_FILE" ]; then
 2. 严禁全库扫描，仅按需读取目标目录的 \`instructions.md\`
 3. 所有任务输出保存至 \`80-Outputs/\`
 4. 定期将重要记忆归档至 \`70-Agent-Memory/\`
-5. 轮询 \`00-Inbox/for-agent/\` 执行反向驱动任务
+5. 通过本地 gate 监听 \`00-Inbox/for-agent/\`，仅在有任务时唤醒模型
 
 ## 🔧 环境信息
 - **Agent**: ${AGENT_NAME}
@@ -138,7 +138,7 @@ else
 
 ## 🔄 自动化工作流
 - **每日归档**: 03:30 执行记忆归档（A/B/C 分类）
-- **反向驱动**: 每 2 分钟轮询 `00-Inbox/for-agent/`
+- **反向驱动**: 本地 gate 先判断 Inbox，空目录不唤醒模型；普通任务 5 分钟、强模型任务 10 分钟分层处理
 - **定期清理**: 每月清理 `00-Inbox/processed/`（保留 30 天）
 VEOF
 fi
@@ -171,7 +171,7 @@ done
 # 3. 为主目录生成 instructions.md（仅当不存在时）
 # 注意：使用兼容 bash 3.2 的写法（macOS 默认版本）
 for info in \
-    "00-Inbox|用途: 闪念收集、Agent 指令入口|何时读取: 有新笔记或收到 for-agent/ 任务时|操作: 处理后将文件移至 processed/" \
+    "00-Inbox|用途: 闪念收集、Agent 指令入口|何时读取: 有新笔记或收到 for-agent/ 任务时|操作: 先用本地 gate 判断是否需要唤醒模型，处理后将文件移至 processed/" \
     "10-Projects|用途: 进行中的项目|何时读取: 处理特定项目任务时|操作: 按项目名创建子文件夹" \
     "20-Areas|用途: 持续关注的领域|何时读取: 需要领域背景知识时|操作: 按领域名组织文件" \
     "30-Resources|用途: 可复用知识资产|何时读取: 查找模板、SOP、方案框架时|操作: 分类存放通用知识" \
@@ -202,13 +202,18 @@ echo "   文件: agent-${AGENT_NAME}.md + VAULT-MAP.md"
 - **第一层 (VAULT-MAP.md)**：Agent 仅通过此文件了解目录用途，不加载具体内容
 - **第二层 (instructions.md)**：仅当 Agent 需要操作某目录时，才加载该目录的 `instructions.md`
 - **效果**：将 Context Window 占用从"全库扫描"降低到"单文件读取"，节省 90%+ Token
+- **监听 gate**：反向驱动监听必须先跑本地脚本判断是否有待处理 `.md`，空目录返回 `{"wakeAgent": false}`，让 cron 调度器跳过 LLM，避免“空轮询也烧 token”
+- **挂载预检**：远程 Vault 场景下，gate 应在 Vault 不存在时尝试 `OBSIDIAN_SMB_URL` 挂载；挂载失败则静默跳过并报告 `vault_unavailable`
+- **分层模型**：普通任务默认使用 cheap tier；只有文件显式写 `model: strong` / `model: deep` 或正文要求“深度分析、复杂推理、跨多篇、强模型/大模型”时，才进入 strong tier
+- **失败熔断**：本地 gate 应检查近期 provider 错误（如 `Arrearage`、`Invalid token`、`Access denied`），命中时返回 `wakeAgent=false`，避免欠费/鉴权错误期间反复请求
+- **状态索引**：处理成功后追加 `80-Outputs/<agent>-response/_index.md`，记录时间、源文件、输出文件、模型层级、状态
 
 ### 3.2 自动化归档（每日凌晨）
 
 > ⚠️ **重要：此 skill 仅定义归档规范和目录结构，不会自动创建 cron 任务。**
 > 完整的 cron 任务配置参考见 `references/cron-config-reference.md`，包含：
 > - 每日 03:30 记忆归档任务的完整创建命令和 prompt
-> - 每 2 分钟反向驱动监听任务的完整创建命令
+> - 本地 gate + cheap/strong 分层反向驱动监听任务
 > - B 类资源分类目录清单
 > - 常见陷阱和注意事项
 
@@ -222,12 +227,34 @@ echo "   文件: agent-${AGENT_NAME}.md + VAULT-MAP.md"
 - **B类 (资源)**: 写入 `30-Resources/` (需具备跨场景复用价值)
 - **C类 (进展)**: 追加至 `50-Daily/YYYY-MM-DD.md`
 
-### 3.3 Obsidian 反向驱动
-Agent 定时轮询 `00-Inbox/for-agent/`：
-1. 发现 `.md` 文件 → 读取指令
-2. 执行任务 → 结果写入 `80-Outputs/agent-response/`
-3. 原文件移至 `00-Inbox/processed/`
-4. 通知用户
+### 3.3 Obsidian 反向驱动（省钱版）
+Agent 不应直接高频扫描 Inbox。推荐流程：
+1. Cron 先运行本地 gate 脚本检查 `00-Inbox/for-agent/`
+2. 没有匹配文件 → gate 输出 `{"wakeAgent": false}`，静默结束，0 token
+3. 有普通任务 → cheap tier job 唤醒小模型处理
+4. 有强模型标记任务 → strong tier job 唤醒强模型处理
+5. 结果写入 `80-Outputs/agent-response/`，原文件移至 `00-Inbox/processed/`
+6. 处理成功后追加 `_index.md`，便于从 Obsidian 里查看 Agent 处理历史
+
+普通任务模板：
+
+```yaml
+---
+type: summarize
+model: cheap
+---
+请总结这篇笔记。
+```
+
+强模型任务模板：
+
+```yaml
+---
+type: research
+model: strong
+---
+请做深度分析，必要时跨多篇笔记综合。
+```
 
 ## 🧪 4. 部署验证清单
 
@@ -239,6 +266,10 @@ Agent 定时轮询 `00-Inbox/for-agent/`：
 - [ ] **导航可用**: `VAULT-MAP.md` 存在且含"读取铁律"
 - [ ] **指令文件**: 各主目录下有 `instructions.md`
 - [ ] **幂等安全**: 二次运行脚本无报错、无重复创建
+- [ ] **监听省钱**: 空 Inbox 时 cron 输出 `wakeAgent=false`，没有新的模型 request dump
+- [ ] **分层可用**: `model: cheap` 文件进入普通 job，`model: strong` 文件进入强模型 job
+- [ ] **挂载稳定**: 远程 Vault 未挂载时，gate 能尝试挂载或返回 `vault_unavailable`
+- [ ] **索引可查**: 处理成功后 `_index.md` 有追加记录
 
 ## ⚠️ 6. 已知陷阱（Pitfalls）
 
@@ -260,6 +291,12 @@ macOS 默认 bash 为 3.2.57，**不支持 bash 4.0+ 语法**：
 - 二次运行不能覆盖用户自定义内容
 - 用户手动修改过 `agent-*.md` 后再次部署，文件内容必须保持不变
 
+### 6.4 反向驱动监听烧 token
+- ❌ 错误设计：cron 每 2 分钟直接唤醒 agent，让 agent 自己判断 Inbox 是否为空
+- ✅ 正确设计：cron 先跑本地 gate 脚本；空目录、无匹配 tier、近期 provider 欠费/鉴权错误时直接 `wakeAgent=false`
+- ✅ 普通任务使用 cheap tier，强模型任务必须显式标记，避免默认走大模型
+- ✅ 监听频率默认普通 5 分钟、强模型 10 分钟；除非有强实时需求，不建议 2 分钟高频唤醒
+
 ## 🏗️ 7. 多实例 Skill 安装指南
 
 当需要将此 skill 安装到多个 Agent 实例时，按以下路径分发。
@@ -280,11 +317,16 @@ macOS 默认 bash 为 3.2.57，**不支持 bash 4.0+ 语法**：
 # 以主实例为源，分发到所有 Hermes 实例
 for home in ~/.hermes ~/.hermes-3 ~/.hermes-newmedia; do
   if [ -d "$home" ]; then
-    mkdir -p "$home/skills/productivity/obsidian-second-brain/scripts"
+    mkdir -p "$home/skills/productivity/obsidian-second-brain/scripts" \
+             "$home/skills/productivity/obsidian-second-brain/references"
     cp ~/.hermes/skills/productivity/obsidian-second-brain/SKILL.md \
        "$home/skills/productivity/obsidian-second-brain/"
-    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh \
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/*.sh \
        "$home/skills/productivity/obsidian-second-brain/scripts/"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/*.py \
+       "$home/skills/productivity/obsidian-second-brain/scripts/" 2>/dev/null || true
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/references/*.md \
+       "$home/skills/productivity/obsidian-second-brain/references/" 2>/dev/null || true
     echo "✅ $home"
   fi
 done
@@ -303,7 +345,7 @@ for ws in ~/.openclaw/workspace*/; do
   if [ -d "$skills_dir" ] && [ ! -d "$skills_dir/obsidian-second-brain" ]; then
     mkdir -p "$skills_dir/obsidian-second-brain/scripts"
     cp ~/.hermes/skills/productivity/obsidian-second-brain/SKILL.md "$skills_dir/obsidian-second-brain/"
-    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh "$skills_dir/obsidian-second-brain/scripts/"
+    cp ~/.hermes/skills/productivity/obsidian-second-brain/scripts/* "$skills_dir/obsidian-second-brain/scripts/"
     echo "✅ $(basename $ws)"
   fi
 done
@@ -336,6 +378,6 @@ done
 
 实际运行的归档 cron 任务配置见 `references/cron-config-reference.md`，包含：
 - 每日 03:30 记忆归档任务的完整流程
-- 每 2 分钟反向驱动监听任务
+- 本地 gate + cheap/strong 分层反向驱动监听任务
 - B 类资源分类目录清单
 - 常见陷阱和注意事项

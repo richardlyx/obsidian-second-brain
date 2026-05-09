@@ -86,32 +86,122 @@ hermes cron create \
 hermes cron list | grep "记忆归档"
 ```
 
-## 任务 2：反向驱动监听（每 2 分钟）
+## 任务 2：反向驱动监听（本地 gate + 分层模型）
 
-### 创建命令（Hermes）
+### 设计原则
+
+不要让 cron 高频直接唤醒 Agent 扫描 Inbox。正确流程是：
+
+1. cron 先运行本地 gate 脚本检查 Inbox
+2. Vault 不存在时，gate 可用 `OBSIDIAN_SMB_URL` 尝试挂载；失败则输出 `vault_unavailable`
+3. 空目录、无匹配 tier、近期 provider 欠费/鉴权错误 → 输出 `{"wakeAgent": false}`，调度器跳过 LLM
+4. 普通任务 → cheap tier job 唤醒小模型
+5. 显式强模型任务 → strong tier job 唤醒强模型
+6. 处理成功后追加 `80-Outputs/<agent>-response/_index.md`
+
+### 安装 gate 脚本
+
+将 skill 自带脚本复制到 Hermes 可执行脚本目录：
+
+```bash
+mkdir -p ~/.hermes/scripts
+cp scripts/hermes-obsidian-gate.py ~/.hermes/scripts/
+cp scripts/hermes-obsidian-strong-gate.py ~/.hermes/scripts/
+chmod 700 ~/.hermes/scripts/hermes-obsidian-gate.py \
+          ~/.hermes/scripts/hermes-obsidian-strong-gate.py
+```
+
+如果你的 Vault 不在默认路径，给 cron 所在环境设置：
+
+```bash
+export OBSIDIAN_AGENT_INBOX="/path/to/vault/00-Inbox/for-agent"
+```
+
+也可以设置 `OBSIDIAN_VAULT_PATH="/path/to/vault"`，gate 会自动推导 `00-Inbox/for-agent`。如果是远程 SMB Vault，可设置 `OBSIDIAN_SMB_URL="smb://host/share"` 让 gate 在 Vault 不存在时尝试挂载。
+
+如果 Hermes 是 launchd 后台服务，普通 shell 里的 `export` 可能不会传给服务；这种情况下要么用 `launchctl setenv OBSIDIAN_VAULT_PATH "/path/to/vault"` 和 `launchctl setenv OBSIDIAN_SMB_URL "smb://host/share"` 后重启 Hermes gateway，要么使用一个小 wrapper 脚本设置环境变量。
+
+### 普通任务监听（cheap tier，每 5 分钟）
 
 ```bash
 hermes cron create \
-  --name "Obsidian 反向驱动监听" \
-  --schedule "*/2 * * * *" \
-  --prompt "你是 Hermes 的 Obsidian 指令处理引擎。请执行以下步骤：
+  --name "Obsidian 反向驱动监听（普通省钱）" \
+  --script hermes-obsidian-gate.py \
+  "*/5 * * * *" \
+  "你是 Hermes 的 Obsidian 低成本指令处理引擎。运行前本地脚本已经完成目录扫描、任务分层和熔断判断。
 
-1. 扫描指令目录：检查 ~/Documents/AI-Knowledge-Base/00-Inbox/for-hermes/ 目录下是否有新的 .md 文件。
-2. 处理指令：
-   - 如果有文件，读取内容。
-   - 根据文件中的指令执行任务（例如：分析笔记、生成内容、回答问题等）。
-   - 将处理结果写入 ~/Documents/AI-Knowledge-Base/80-Outputs/hermes-response/ 目录，文件名格式为 response_YYYYMMDD_HHMMSS.md。
-3. 归档原文件：将处理过的文件移动到 ~/Documents/AI-Knowledge-Base/00-Inbox/processed/ 目录。
-4. 反馈用户：发送一条 Telegram 消息通知用户指令已处理完成，并简要说明处理结果。
+执行规则：
+1. 只处理 Script Output 中 Selected file / target_file 指定的那个 .md 文件，不要重新选择其他文件。
+2. 当前 job 是 cheap tier，只处理普通 Obsidian 指令；深度分析、复杂推理、跨多篇综合、明确 model: strong 的任务由强模型 job 处理。
+3. 读取目标文件内容，根据其中指令完成任务。优先使用现有本地文件和 Obsidian 内容，不需要联网时不要联网。
+4. 输出目录以 Script Output 中的 Output dir / output_dir 为准；写入文件名格式为 response_YYYYMMDD_HHMMSS.md。
+5. 处理成功后，将原文件移动到 Script Output 中的 Processed dir / processed_dir。
+6. 处理成功后，追加一行到 Script Output 中的 Index file / index_file，格式：- YYYY-MM-DD HH:MM | tier=cheap | source=<原文件名> | output=<输出文件名> | status=ok。
+7. 最终回复只给用户一个简短结果：处理了哪个文件、输出写到哪里、是否已归档、索引是否已更新。
 
-如果没有新文件，静默结束，不要发送任何消息。
-
-注意：
-- 每次只处理一个文件（按创建时间最早的先处理）。
-- 保持响应简洁、结构化。
-- 敏感信息不写入输出目录。" \
-  --toolsets terminal,file
+省钱规则：
+- 不做用户没有要求的扩展分析。
+- 不对整库做广泛扫描，除非目标文件明确要求。
+- 敏感信息不要写入输出目录。"
 ```
+
+### 强模型监听（strong tier，每 10 分钟）
+
+```bash
+hermes cron create \
+  --name "Obsidian 反向驱动监听（深度强模型）" \
+  --script hermes-obsidian-strong-gate.py \
+  "*/10 * * * *" \
+  "你是 Hermes 的 Obsidian 强模型指令处理引擎，只处理明确标记为强模型/深度任务的文件。运行前本地脚本已经完成目录扫描、任务分层和熔断判断。
+
+执行规则：
+1. 只处理 Script Output 中 Selected file / target_file 指定的那个 .md 文件，不要处理普通 cheap tier 文件。
+2. 适用任务包括：frontmatter 写了 model: strong / model: deep，或正文明确要求深度分析、复杂推理、跨多篇综合。
+3. 根据目标文件完成深度处理，但仍然保持范围克制；只读取任务所需文件。
+4. 输出目录以 Script Output 中的 Output dir / output_dir 为准；写入文件名格式为 response_YYYYMMDD_HHMMSS.md。
+5. 处理成功后，将原文件移动到 Script Output 中的 Processed dir / processed_dir。
+6. 处理成功后，追加一行到 Script Output 中的 Index file / index_file，格式：- YYYY-MM-DD HH:MM | tier=strong | source=<原文件名> | output=<输出文件名> | status=ok。
+7. 最终回复只给用户一个简短结果：处理了哪个文件、输出写到哪里、是否已归档、索引是否已更新。
+
+成本规则：
+- 只有明确强模型任务才运行本 job。
+- 不要做任务外的额外研究或整库扫描。
+- 敏感信息不要写入输出目录。"
+```
+
+> Hermes `cron create` 当前不暴露 per-job model/provider 参数。要固定模型，可使用全局 Hermes model 配置，或在 `~/.hermes/cron/jobs.json` 中给对应 job 增加 `model` / `provider` 字段。推荐：cheap tier 使用便宜小模型，strong tier 只在显式强任务时使用强模型。
+
+### Obsidian 任务文件模板
+
+普通任务：
+
+```yaml
+---
+type: summarize
+model: cheap
+---
+请总结这篇笔记。
+```
+
+强模型任务：
+
+```yaml
+---
+type: research
+model: strong
+---
+请做深度分析，必要时跨多篇笔记综合。
+```
+
+### 验证监听不烧 token
+
+空 Inbox 时，cron output 应类似：
+
+```text
+Script gate returned `wakeAgent=false` — agent skipped.
+```
+
+并且 `~/.hermes/sessions/` 下不应出现对应时间的新 `request_dump_cron_<job_id>...json`。
 
 ## B 类资源分类目录清单
 
@@ -132,3 +222,5 @@ hermes cron create \
 3. **过度归档** — 不要保存一次性对话、临时状态、未完成草稿
 4. **分类错误** — B 类资源必须具有跨场景复用价值，项目专属内容应归入 C 类
 5. **文件命名冲突** — 使用统一的命名格式，避免覆盖已有文件
+6. **空轮询烧 token** — 不要恢复为“每 2 分钟直接唤醒 Agent 扫描目录”；必须保留本地 gate
+7. **失败无限重试** — 遇到 `Arrearage`、`Invalid token`、`Access denied` 等 provider 错误时，gate 应熔断并跳过 LLM
