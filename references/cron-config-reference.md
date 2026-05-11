@@ -50,9 +50,9 @@ hermes cron create \
 
 ## 第三步：写入记忆
 
-### A 类 → Hermes MemOS + Obsidian Agent Memory
+### A 类 → Agent Memory + Obsidian Agent Memory
 1. 对每条 A 类信息，调用 memory(action='add', target='memory') 或 target='user'
-2. 同时追加到 Obsidian 70-Agent-Memory/inbox/Hermes.md（先读现有去重）
+2. 同时追加到 Obsidian 70-Agent-Memory/inbox/<agent-name>.md（Hermes 默认为 hermes.md，先读现有去重）
    格式：## YYYY-MM-DD\\n- 要点 1\\n- 要点 2
 
 ### B 类 → Obsidian 30-Resources/ 资源库
@@ -97,7 +97,7 @@ hermes cron list | grep "记忆归档"
 3. 空目录、无匹配 tier、近期 provider 欠费/鉴权错误 → 输出 `{"wakeAgent": false}`，调度器跳过 LLM
 4. 普通任务 → cheap tier job 唤醒小模型
 5. 显式强模型任务 → strong tier job 唤醒强模型
-6. 处理成功后追加 `80-Outputs/<agent>-response/_index.md`
+6. 处理成功后追加 `80-Outputs/<agent-name>-response/_index.md`
 
 ### 安装 gate 脚本
 
@@ -114,10 +114,11 @@ chmod 700 ~/.hermes/scripts/hermes-obsidian-gate.py \
 如果你的 Vault 不在默认路径，给 cron 所在环境设置：
 
 ```bash
+export OBSIDIAN_AGENT_NAME="hermes"
 export OBSIDIAN_AGENT_INBOX="/path/to/vault/00-Inbox/for-agent"
 ```
 
-也可以设置 `OBSIDIAN_VAULT_PATH="/path/to/vault"`，gate 会自动推导 `00-Inbox/for-agent`。如果是远程 SMB Vault，可设置 `OBSIDIAN_SMB_URL="smb://host/share"` 让 gate 在 Vault 不存在时尝试挂载。
+也可以设置 `OBSIDIAN_VAULT_PATH="/path/to/vault"`，gate 会自动推导 `00-Inbox/for-agent`，并按 `OBSIDIAN_AGENT_NAME` 推导输出目录 `80-Outputs/<agent-name>-response/`。如果是远程 SMB Vault，可设置 `OBSIDIAN_SMB_URL="smb://host/share"` 让 gate 在 Vault 不存在时尝试挂载。
 
 如果 Hermes 是 launchd 后台服务，普通 shell 里的 `export` 可能不会传给服务；这种情况下要么用 `launchctl setenv OBSIDIAN_VAULT_PATH "/path/to/vault"` 和 `launchctl setenv OBSIDIAN_SMB_URL "smb://host/share"` 后重启 Hermes gateway，要么使用一个小 wrapper 脚本设置环境变量。
 

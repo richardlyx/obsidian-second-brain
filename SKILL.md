@@ -50,36 +50,40 @@ mkdir -p "$VAULT"
 # 0. Agent 身份检测（轻量级，零依赖，3层优先级）
 # ════════════════════════════════════════════════════════════
 detect_agent() {
-    # L1: 环境变量
-    [ -n "${ANTHROPIC_API_KEY:-}" ]  && { echo "claude";  return; }
+    # L0: explicit override
+    [ -n "${OBSIDIAN_AGENT_NAME:-}" ] && { echo "$OBSIDIAN_AGENT_NAME"; return; }
+
+    # L1: environment variables, prefer product-specific signals before generic API keys
     [ -n "${HERMES_CONFIG:-}" ]      && { echo "hermes";  return; }
     [ -n "${HERMES_HOME:-}" ]        && { echo "hermes";  return; }
     [ -n "${OPENCLAW_CONFIG:-}" ]    && { echo "openclaw"; return; }
     [ -n "${CODEX:-}" ]              && { echo "codex";   return; }
+    [ -n "${ANTHROPIC_API_KEY:-}" ]  && { echo "claude";  return; }
 
-    # L2: CLI 命令
-    command -v claude  &>/dev/null && { echo "claude";  return; }
+    # L2: CLI commands
     command -v hermes  &>/dev/null && { echo "hermes";  return; }
     command -v openclaw &>/dev/null && { echo "openclaw"; return; }
     command -v codex   &>/dev/null && { echo "codex";   return; }
+    command -v claude  &>/dev/null && { echo "claude";  return; }
 
-    # L3: 特征目录
-    [ -d "$HOME/.claude" ]  && { echo "claude";  return; }
+    # L3: feature directories
     [ -d "$HOME/.hermes" ]  && { echo "hermes";  return; }
+    [ -d "$HOME/.openclaw" ] && { echo "openclaw"; return; }
+    [ -d "$HOME/.claude" ]  && { echo "claude";  return; }
 
-    # 兜底
+    # fallback
     echo "agent"
 }
-
 AGENT_NAME=$(detect_agent)
+AGENT_TITLE="$(echo "$AGENT_NAME" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+AGENT_MEMORY_FILE="70-Agent-Memory/inbox/${AGENT_NAME}.md"
+AGENT_OUTPUT_DIR="80-Outputs/${AGENT_NAME}-response"
 echo "🔍 检测到 Agent: $AGENT_NAME"
 
 # 创建 Agent 专属配置文件（使用 agent- 前缀，macOS 安全）
 AGENT_FILE="$VAULT/agent-${AGENT_NAME}.md"
 if [ ! -f "$AGENT_FILE" ]; then
     echo "✅ 创建: agent-${AGENT_NAME}.md"
-    # 首字母大写（兼容 bash 3.2，macOS 默认版本）
-    AGENT_TITLE="$(echo "$AGENT_NAME" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
     cat > "$AGENT_FILE" << AEOF
 # ${AGENT_TITLE} Agent — 第二大脑配置
 
@@ -90,8 +94,8 @@ if [ ! -f "$AGENT_FILE" ]; then
 ## 🧭 使用指南
 1. 每次会话启动时读取 \`VAULT-MAP.md\`（全局规则）
 2. 严禁全库扫描，仅按需读取目标目录的 \`instructions.md\`
-3. 所有任务输出保存至 \`80-Outputs/\`
-4. 定期将重要记忆归档至 \`70-Agent-Memory/\`
+3. 所有任务输出保存至 \`${AGENT_OUTPUT_DIR}/\`
+4. 重要记忆先写入 \`${AGENT_MEMORY_FILE}\`，再由归纳流程审核合并
 5. 通过本地 gate 监听 \`00-Inbox/for-agent/\`，仅在有任务时唤醒模型
 
 ## 🔧 环境信息
@@ -159,14 +163,43 @@ DIRS=(
     "70-Agent-Memory/reviews"
     "70-Agent-Memory/processed"
     "70-Agent-Memory/backups"
-    "80-Outputs/agent-response"
-    "80-Outputs/hermes-response"
+    "$AGENT_OUTPUT_DIR"
     "99-Attachments"
 )
 
 for d in "${DIRS[@]}"; do
     mkdir -p "$VAULT/$d"
 done
+
+MEMORY_FILE="$VAULT/$AGENT_MEMORY_FILE"
+if [ ! -f "$MEMORY_FILE" ]; then
+    cat > "$MEMORY_FILE" << MEOF
+---
+created: $(date '+%Y-%m-%d %H:%M')
+source: ${AGENT_NAME}
+type: agent-memory-inbox
+tags:
+  - Agent记忆
+  - ${AGENT_NAME}
+---
+# ${AGENT_TITLE} 候选共享记忆
+
+> 这里保存 ${AGENT_TITLE} 准备提交给共享长期记忆的候选内容。多 Agent 环境下由归纳流程审核后合并到 ../MEMORY.md；单 Agent 环境下也可以作为长期记忆更新入口。
+
+## 待归纳
+MEOF
+    echo "✅ 创建: $AGENT_MEMORY_FILE"
+fi
+
+OUTPUT_INDEX="$VAULT/$AGENT_OUTPUT_DIR/_index.md"
+if [ ! -f "$OUTPUT_INDEX" ]; then
+    cat > "$OUTPUT_INDEX" << OEOF
+# ${AGENT_TITLE} 输出索引
+
+本目录保存 ${AGENT_TITLE} 生成的报告、分析结果和可复用输出。
+OEOF
+    echo "✅ 创建: $AGENT_OUTPUT_DIR/_index.md"
+fi
 
 # 3. 为主目录生成 instructions.md（仅当不存在时）
 # 注意：使用兼容 bash 3.2 的写法（macOS 默认版本）
@@ -206,7 +239,7 @@ echo "   文件: agent-${AGENT_NAME}.md + VAULT-MAP.md"
 - **挂载预检**：远程 Vault 场景下，gate 应在 Vault 不存在时尝试 `OBSIDIAN_SMB_URL` 挂载；挂载失败则静默跳过并报告 `vault_unavailable`
 - **分层模型**：普通任务默认使用 cheap tier；只有文件显式写 `model: strong` / `model: deep` 或正文要求“深度分析、复杂推理、跨多篇、强模型/大模型”时，才进入 strong tier
 - **失败熔断**：本地 gate 应检查近期 provider 错误（如 `Arrearage`、`Invalid token`、`Access denied`），命中时返回 `wakeAgent=false`，避免欠费/鉴权错误期间反复请求
-- **状态索引**：处理成功后追加 `80-Outputs/<agent>-response/_index.md`，记录时间、源文件、输出文件、模型层级、状态
+- **状态索引**：处理成功后追加 `80-Outputs/<agent-name>-response/_index.md`，记录时间、源文件、输出文件、模型层级、状态
 
 ### 3.2 自动化归档（每日凌晨）
 
@@ -223,7 +256,7 @@ echo "   文件: agent-${AGENT_NAME}.md + VAULT-MAP.md"
 **OpenClaw 用户**：在 heartbeat 配置中添加相应的归档脚本
 
 归档任务应调用 Agent 的文件读写工具，按以下规则执行：
-- **A类 (记忆)**: 写入 `70-Agent-Memory/inbox/<Agent>.md`
+- **A类 (记忆)**: 写入 `70-Agent-Memory/inbox/<agent-name>.md`
 - **B类 (资源)**: 写入 `30-Resources/` (需具备跨场景复用价值)
 - **C类 (进展)**: 追加至 `50-Daily/YYYY-MM-DD.md`
 
@@ -233,7 +266,7 @@ Agent 不应直接高频扫描 Inbox。推荐流程：
 2. 没有匹配文件 → gate 输出 `{"wakeAgent": false}`，静默结束，0 token
 3. 有普通任务 → cheap tier job 唤醒小模型处理
 4. 有强模型标记任务 → strong tier job 唤醒强模型处理
-5. 结果写入 `80-Outputs/agent-response/`，原文件移至 `00-Inbox/processed/`
+5. 结果写入 `80-Outputs/<agent-name>-response/`，原文件移至 `00-Inbox/processed/`
 6. 处理成功后追加 `_index.md`，便于从 Obsidian 里查看 Agent 处理历史
 
 普通任务模板：

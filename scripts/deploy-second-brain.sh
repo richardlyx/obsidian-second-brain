@@ -3,7 +3,7 @@
 # 兼容 macOS bash 3.2.57，经过全面验证
 # 用法: bash deploy-second-brain.sh [VAULT_PATH]
 #       默认 Vault: ~/Documents/Obsidian Vault
-#       可通过 OBSDIDIAN_VAULT_PATH 环境变量覆盖
+#       可通过 OBSIDIAN_VAULT_PATH 环境变量覆盖
 
 set -euo pipefail
 
@@ -16,36 +16,40 @@ mkdir -p "$VAULT"
 # 0. Agent 身份检测（轻量级，零依赖，3层优先级）
 # ════════════════════════════════════════════════════════════
 detect_agent() {
-    # L1: 环境变量
-    [ -n "${ANTHROPIC_API_KEY:-}" ]  && { echo "claude";  return; }
+    # L0: explicit override
+    [ -n "${OBSIDIAN_AGENT_NAME:-}" ] && { echo "$OBSIDIAN_AGENT_NAME"; return; }
+
+    # L1: environment variables, prefer product-specific signals before generic API keys
     [ -n "${HERMES_CONFIG:-}" ]      && { echo "hermes";  return; }
     [ -n "${HERMES_HOME:-}" ]        && { echo "hermes";  return; }
     [ -n "${OPENCLAW_CONFIG:-}" ]    && { echo "openclaw"; return; }
     [ -n "${CODEX:-}" ]              && { echo "codex";   return; }
+    [ -n "${ANTHROPIC_API_KEY:-}" ]  && { echo "claude";  return; }
 
-    # L2: CLI 命令
-    command -v claude  &>/dev/null && { echo "claude";  return; }
+    # L2: CLI commands
     command -v hermes  &>/dev/null && { echo "hermes";  return; }
     command -v openclaw &>/dev/null && { echo "openclaw"; return; }
     command -v codex   &>/dev/null && { echo "codex";   return; }
+    command -v claude  &>/dev/null && { echo "claude";  return; }
 
-    # L3: 特征目录
-    [ -d "$HOME/.claude" ]  && { echo "claude";  return; }
+    # L3: feature directories
     [ -d "$HOME/.hermes" ]  && { echo "hermes";  return; }
+    [ -d "$HOME/.openclaw" ] && { echo "openclaw"; return; }
+    [ -d "$HOME/.claude" ]  && { echo "claude";  return; }
 
-    # 兜底
+    # fallback
     echo "agent"
 }
-
 AGENT_NAME=$(detect_agent)
+AGENT_TITLE="$(echo "$AGENT_NAME" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+AGENT_MEMORY_FILE="70-Agent-Memory/inbox/${AGENT_NAME}.md"
+AGENT_OUTPUT_DIR="80-Outputs/${AGENT_NAME}-response"
 echo "🔍 检测到 Agent: $AGENT_NAME"
 
 # 创建 Agent 专属配置文件（使用 agent- 前缀，macOS 安全）
 AGENT_FILE="$VAULT/agent-${AGENT_NAME}.md"
 if [ ! -f "$AGENT_FILE" ]; then
     echo "✅ 创建: agent-${AGENT_NAME}.md"
-    # 首字母大写（兼容 bash 3.2，macOS 默认版本）
-    AGENT_TITLE="$(echo "$AGENT_NAME" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
     cat > "$AGENT_FILE" << AEOF
 # ${AGENT_TITLE} Agent — 第二大脑配置
 
@@ -56,8 +60,8 @@ if [ ! -f "$AGENT_FILE" ]; then
 ## 🧭 使用指南
 1. 每次会话启动时读取 \`VAULT-MAP.md\`（全局规则）
 2. 严禁全库扫描，仅按需读取目标目录的 \`instructions.md\`
-3. 所有任务输出保存至 \`80-Outputs/\`
-4. 定期将重要记忆归档至 \`70-Agent-Memory/\`
+3. 所有任务输出保存至 \`${AGENT_OUTPUT_DIR}/\`
+4. 重要记忆先写入 \`${AGENT_MEMORY_FILE}\`，再由归纳流程审核合并
 5. 通过本地 gate 监听 \`00-Inbox/for-agent/\`，仅在有任务时唤醒模型
 
 ## 🔧 环境信息
@@ -125,14 +129,43 @@ DIRS=(
     "70-Agent-Memory/reviews"
     "70-Agent-Memory/processed"
     "70-Agent-Memory/backups"
-    "80-Outputs/agent-response"
-    "80-Outputs/hermes-response"
+    "$AGENT_OUTPUT_DIR"
     "99-Attachments"
 )
 
 for d in "${DIRS[@]}"; do
     mkdir -p "$VAULT/$d"
 done
+
+MEMORY_FILE="$VAULT/$AGENT_MEMORY_FILE"
+if [ ! -f "$MEMORY_FILE" ]; then
+    cat > "$MEMORY_FILE" << MEOF
+---
+created: $(date '+%Y-%m-%d %H:%M')
+source: ${AGENT_NAME}
+type: agent-memory-inbox
+tags:
+  - Agent记忆
+  - ${AGENT_NAME}
+---
+# ${AGENT_TITLE} 候选共享记忆
+
+> 这里保存 ${AGENT_TITLE} 准备提交给共享长期记忆的候选内容。多 Agent 环境下由归纳流程审核后合并到 ../MEMORY.md；单 Agent 环境下也可以作为长期记忆更新入口。
+
+## 待归纳
+MEOF
+    echo "✅ 创建: $AGENT_MEMORY_FILE"
+fi
+
+OUTPUT_INDEX="$VAULT/$AGENT_OUTPUT_DIR/_index.md"
+if [ ! -f "$OUTPUT_INDEX" ]; then
+    cat > "$OUTPUT_INDEX" << OEOF
+# ${AGENT_TITLE} 输出索引
+
+本目录保存 ${AGENT_TITLE} 生成的报告、分析结果和可复用输出。
+OEOF
+    echo "✅ 创建: $AGENT_OUTPUT_DIR/_index.md"
+fi
 
 # 3. 为主目录生成 instructions.md（仅当不存在时）
 # 注意：使用兼容 bash 3.2 的写法（macOS 默认版本）

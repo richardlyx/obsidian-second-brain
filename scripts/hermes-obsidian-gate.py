@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,31 @@ from pathlib import Path
 
 DEFAULT_VAULT = "~/Documents/Obsidian Vault"
 VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", DEFAULT_VAULT)).expanduser()
-AGENT_NAME = os.getenv("OBSIDIAN_AGENT_NAME", "agent").strip() or "agent"
-DEFAULT_INBOX = str(VAULT / "00-Inbox" / f"for-{AGENT_NAME}")
+def detect_agent() -> str:
+    explicit = os.getenv("OBSIDIAN_AGENT_NAME", "").strip()
+    if explicit:
+        return explicit
+    env_checks = (
+        ("HERMES_CONFIG", "hermes"),
+        ("HERMES_HOME", "hermes"),
+        ("OPENCLAW_CONFIG", "openclaw"),
+        ("CODEX", "codex"),
+        ("ANTHROPIC_API_KEY", "claude"),
+    )
+    for key, name in env_checks:
+        if os.getenv(key):
+            return name
+    for command, name in (("hermes", "hermes"), ("openclaw", "openclaw"), ("codex", "codex"), ("claude", "claude")):
+        if shutil.which(command):
+            return name
+    for path, name in (("~/.hermes", "hermes"), ("~/.openclaw", "openclaw"), ("~/.claude", "claude")):
+        if Path(path).expanduser().is_dir():
+            return name
+    return "agent"
+
+
+AGENT_NAME = detect_agent()
+DEFAULT_INBOX = str(VAULT / "00-Inbox" / "for-agent")
 INBOX = Path(os.getenv("OBSIDIAN_AGENT_INBOX", DEFAULT_INBOX)).expanduser()
 PROCESSED_DIR = Path(
     os.getenv("OBSIDIAN_AGENT_PROCESSED", str(VAULT / "00-Inbox" / "processed"))

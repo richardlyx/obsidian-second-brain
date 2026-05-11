@@ -13,7 +13,7 @@
 
 ## 📦 快速安装
 
-### 方式一：Hermes Agent（推荐）
+### 方式一：Hermes 安装
 
 ```bash
 hermes skills install richardlyx/obsidian-second-brain
@@ -25,7 +25,23 @@ hermes skills install richardlyx/obsidian-second-brain
 bash ~/.hermes/skills/productivity/obsidian-second-brain/scripts/deploy-second-brain.sh ~/Documents/AI-Knowledge-Base
 ```
 
-### 方式二：手动部署
+### 方式二：OpenClaw 安装
+
+如果该 skill 已发布到 ClawHub：
+
+```bash
+openclaw skills install obsidian-second-brain
+```
+
+本地安装可直接复制到当前 OpenClaw workspace：
+
+```bash
+mkdir -p ~/.openclaw/workspace/skills
+cp -R obsidian-second-brain ~/.openclaw/workspace/skills/
+~/.openclaw/workspace/skills/obsidian-second-brain/scripts/deploy-second-brain.sh ~/Documents/AI-Knowledge-Base
+```
+
+### 方式三：手动部署
 
 ```bash
 git clone https://github.com/richardlyx/obsidian-second-brain.git
@@ -33,7 +49,7 @@ cd obsidian-second-brain
 bash scripts/deploy-second-brain.sh /path/to/your/vault
 ```
 
-### 方式三：一行命令
+### 方式四：一行命令
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/richardlyx/obsidian-second-brain/main/scripts/deploy-second-brain.sh | bash -s /path/to/your/vault
@@ -60,8 +76,7 @@ Vault/
 │   ├── processed/            # 已归档
 │   └── backups/              # 备份
 ├── 80-Outputs/               # 生成成品与响应
-│   ├── agent-response/       # Agent 任务产出
-│   └── hermes-response/      # Hermes 专属产出（可含 _index.md）
+│   └── <agent-name>-response/ # 当前 Agent 任务产出（可含 _index.md）
 └── 99-Attachments/           # 附件存储
 ```
 
@@ -73,13 +88,13 @@ Agent 自动将对话中的重要信息分类归档：
 
 | 类别 | 写入位置 | 说明 |
 |------|----------|------|
-| A类（记忆） | `70-Agent-Memory/inbox/<Agent>.md` | 用户偏好、环境配置、工具经验 |
+| A类（记忆） | `70-Agent-Memory/inbox/<agent-name>.md` | 用户偏好、环境配置、工具经验 |
 | B类（资源） | `30-Resources/` | 提示词模板、SOP、方案框架等可复用知识 |
 | C类（进展） | `50-Daily/YYYY-MM-DD.md` | 当日工作日志、待跟进事项 |
 
 ### 反向驱动（轮询 Inbox）
 
-用户在 `00-Inbox/for-agent/` 放置任务文件 → 本地 gate 判断是否需要唤醒模型 → 普通任务走 cheap tier，强任务走 strong tier → 结果写入 `80-Outputs/` → 通知用户。
+用户在 `00-Inbox/for-agent/` 放置任务文件 → 本地 gate 判断是否需要唤醒模型 → 普通任务走 cheap tier，强任务走 strong tier → 结果写入 `80-Outputs/<agent-name>-response/` → 通知用户。
 
 推荐任务模板：
 
@@ -154,11 +169,13 @@ macOS 默认 bash 为 3.2.57，**不支持 bash 4.0+ 语法**：
 ```
 obsidian-second-brain/
 ├── README.md                    # 本文件
-├── SKILL.md                     # Hermes Skill 完整定义
+├── SKILL.md                     # Skill 完整定义
 ├── references/
 │   └── cron-config-reference.md # Cron 任务配置参考（含完整创建命令和 prompt）
 └── scripts/
-    └── deploy-second-brain.sh   # 自动化部署脚本（7.7KB）
+    ├── deploy-second-brain.sh          # 自动化部署脚本
+    ├── hermes-obsidian-gate.py         # cheap tier 本地唤醒 gate
+    └── hermes-obsidian-strong-gate.py  # strong tier 本地唤醒 gate
 ```
 
 ## ⏰ 定时任务配置
